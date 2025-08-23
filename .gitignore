@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Node / Next.js
+node_modules/
+.next/
+dist/
+build/
+.vercel/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+.env.local
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Misc
+coverage/
+debug_input.png
