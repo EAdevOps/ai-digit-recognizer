@@ -2,6 +2,7 @@
 set -euo pipefail
 
 # 1) Install Python deps
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 # 2) Download the model (once, at build time)
