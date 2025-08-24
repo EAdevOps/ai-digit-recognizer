@@ -14,6 +14,11 @@ export default function DigitCanvas() {
   const [result, setResult] = useState<PredictResponse | null>(null);
   const API_URL =
     process.env.NEXT_PUBLIC_API_BASE || process.env.NEXT_PUBLIC_API_URL || "";
+  if (!API_URL) {
+    console.warn("NEXT_PUBLIC_API_URL (or _API_BASE) is missing!");
+  } else {
+    console.log("Using API_URL:", API_URL);
+  }
 
   // ----- setup the canvas once
   useEffect(() => {
