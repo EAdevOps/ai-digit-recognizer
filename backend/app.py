@@ -1,11 +1,15 @@
 # app.py (top section)
 import base64, io, os, sys, traceback
 import numpy as np
-from PIL import Image
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS, cross_origin
 import tensorflow as tf
-
+from PIL import Image
+try:
+    RESAMPLE = Image.Resampling.LANCZOS  # Pillow ≥10/11
+except AttributeError:
+    RESAMPLE = getattr(Image, "LANCZOS", Image.BICUBIC)  # fallback for older Pillow
 app = Flask(__name__)
 # Basic CORS for simple GETs
 CORS(app, resources={
@@ -38,7 +42,7 @@ def preprocess_from_base64(b64_png: str) -> np.ndarray:
     img = Image.open(io.BytesIO(img_bytes)).convert("L")  # grayscale
 
     # Resize large first for stable steps
-    img = img.resize((280, 280), Image.LANCZOS)
+    img = img.resize((280, 280), RESAMPLE)
     arr = np.array(img, dtype=np.float32) / 255.0
 
     # Auto-invert if background is bright
@@ -67,7 +71,7 @@ def preprocess_from_base64(b64_png: str) -> np.ndarray:
     x_start = (m - w) // 2
     sq[y_start:y_start + h, x_start:x_start + w] = crop
 
-    pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), Image.LANCZOS)
+    pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), RESAMPLE)
     d20 = np.array(pil20, dtype=np.float32) / 255.0
 
     # Center 20x20 into 28x28 (MNIST style)
@@ -89,7 +93,7 @@ def preprocess_from_base64(b64_png: str) -> np.ndarray:
 
 def preprocess_from_image(img: Image.Image) -> np.ndarray:
     """Same pipeline as base64, starting from a PIL Image (grayscale)."""
-    img = img.convert("L").resize((280, 280), Image.LANCZOS)
+    img = img.convert("L").resize((280, 280), RESAMPLE)
     arr = np.array(img, dtype=np.float32) / 255.0
     if arr.mean() > 0.5:
         arr = 1.0 - arr
@@ -106,7 +110,7 @@ def preprocess_from_image(img: Image.Image) -> np.ndarray:
     y_start = (m - h) // 2
     x_start = (m - w) // 2
     sq[y_start:y_start + h, x_start:x_start + w] = crop
-    pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), Image.LANCZOS)
+    pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), RESAMPLE)
     d20 = np.array(pil20, dtype=np.float32) / 255.0
     arr28 = np.zeros((28, 28), dtype=np.float32)
     arr28[4:24, 4:24] = d20
