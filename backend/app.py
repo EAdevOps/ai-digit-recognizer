@@ -1,47 +1,38 @@
 # app.py
 import base64, io, os, sys, traceback
-from flask import Flask, request, jsonify, current_app, make_response
+from flask import Flask, request, jsonify, current_app
 from flask_cors import CORS
 import numpy as np
 from PIL import Image
 import tensorflow as tf
 
-# ---------- Pillow resample constant (Pillow 11+ compatibility) ----------
+# ---- Pillow resample compat ----
 try:
-    RESAMPLE = Image.Resampling.LANCZOS  # Pillow ≥10
+    RESAMPLE = Image.Resampling.LANCZOS
 except AttributeError:
-    RESAMPLE = getattr(Image, "LANCZOS", Image.BICUBIC)  # fallback
+    RESAMPLE = getattr(Image, "LANCZOS", Image.BICUBIC)
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "model/mnist_cnn.keras")
 
 app = Flask(__name__)
 
-# Allow your Netlify site + localhost (dev)
-ALLOWED_ORIGINS = {
-    "https://aidigitrecognizer.netlify.app",
-    "http://localhost:3000",
-}
-
-# Flask-CORS for normal happy path
+# 🔓 TEMP: allow any origin while we debug
 CORS(
     app,
-    resources={r"/*": {"origins": list(ALLOWED_ORIGINS)}},
+    resources={r"/*": {"origins": "*"}},
     methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
-# Also force CORS headers on EVERY response, including errors
+# Force the headers onto every response, including errors and 204s
 @app.after_request
 def add_cors_headers(resp):
-    origin = request.headers.get("Origin")
-    if origin in ALLOWED_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Origin"] = "*"   # no credentials used, so * is ok
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Vary"] = "Origin"
     return resp
 
-# ---- Model load with clear logs ----
 print(f"[BOOT] Python: {sys.version}", flush=True)
 print(f"[BOOT] CWD: {os.getcwd()}", flush=True)
 print(f"[BOOT] Looking for model at: {MODEL_PATH}", flush=True)
@@ -53,7 +44,6 @@ try:
 except Exception:
     print("[BOOT] Model load FAILED ❌", flush=True)
     traceback.print_exc()
-    # don't raise — service can still return a clear 503 on /predict
     app.config["MODEL"] = None
 
 def get_model():
@@ -63,45 +53,29 @@ def preprocess_from_base64(b64_png: str) -> np.ndarray:
     if b64_png.startswith("data:image"):
         b64_png = b64_png.split(",", 1)[1]
     img_bytes = base64.b64decode(b64_png)
-    img = Image.open(io.BytesIO(img_bytes)).convert("L")  # grayscale
-
-    # Resize to stabilize, normalize 0..1
+    img = Image.open(io.BytesIO(img_bytes)).convert("L")
     img = img.resize((280, 280), RESAMPLE)
     arr = np.array(img, dtype=np.float32) / 255.0
-
-    # Auto-invert if background is white
     if arr.mean() > 0.5:
         arr = 1.0 - arr
-
-    # Light thresholding
     arr_bin = (arr > 0.2).astype(np.float32)
-
-    # Empty drawing → zeros
     if arr_bin.sum() == 0:
         arr28 = np.zeros((28, 28), dtype=np.float32)
         return arr28[None, ..., None]
-
-    # Crop to digit bbox
     ys, xs = np.where(arr_bin > 0)
     y0, y1 = ys.min(), ys.max() + 1
     x0, x1 = xs.min(), xs.max() + 1
     crop = arr[y0:y1, x0:x1]
-
-    # Pad to square, resize to 20x20, center into 28x28
     h, w = crop.shape
     m = max(h, w)
     sq = np.zeros((m, m), dtype=np.float32)
     y_start = (m - h) // 2
     x_start = (m - w) // 2
     sq[y_start:y_start + h, x_start:x_start + w] = crop
-
     pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), RESAMPLE)
     d20 = np.array(pil20, dtype=np.float32) / 255.0
-
     arr28 = np.zeros((28, 28), dtype=np.float32)
     arr28[4:24, 4:24] = d20
-
-    # Rough center-of-mass recentering
     ys2, xs2 = np.nonzero(arr28 > 0.01)
     if len(ys2) > 0:
         weights = arr28[ys2, xs2]
@@ -111,7 +85,6 @@ def preprocess_from_base64(b64_png: str) -> np.ndarray:
         dx = 14 - cx
         arr28 = np.roll(arr28, shift=dy, axis=0)
         arr28 = np.roll(arr28, shift=dx, axis=1)
-
     return arr28[None, ..., None]
 
 @app.get("/")
@@ -124,17 +97,18 @@ def health():
 
 @app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
-    # Handle preflight quickly
     if request.method == "OPTIONS":
+        print("[/predict] preflight", flush=True)
         return ("", 204)
 
+    print("[/predict] POST hit", flush=True)
     model = get_model()
     if model is None:
         return jsonify({"error": "Model not loaded on server"}), 503
 
     try:
-        # Case 1: multipart/form-data
         if "file" in request.files:
+            print("[/predict] multipart file", flush=True)
             f = request.files["file"]
             img = Image.open(f.stream).convert("L")
             img = img.resize((280, 280), RESAMPLE)
@@ -170,14 +144,13 @@ def predict():
                     arr28 = np.roll(arr28, shift=dx, axis=1)
                 x = arr28[None, ..., None].astype(np.float32)
 
-        # Case 2: JSON { image: "data:image/png;base64,..." }
         elif request.is_json:
+            print("[/predict] JSON body", flush=True)
             data = request.get_json(silent=True) or {}
             data_url = data.get("image", "")
             if not data_url:
                 return jsonify({"error": "Provide JSON { image: <dataURL> }"}), 400
             x = preprocess_from_base64(data_url)
-
         else:
             return jsonify({"error": "Provide form-data file or JSON {image}"}), 400
 
