@@ -1,8 +1,6 @@
-# backend/requirements.txt
 flask
 flask-cors
 gunicorn
-tensorflow==2.17.0
+tensorflow==2.20.0
 pillow
 requests
-# (no explicit numpy line)

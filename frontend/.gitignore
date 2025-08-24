@@ -24,6 +24,10 @@ yarn-error.log*
 .env.*
 !.env.example
 .env.local
+venv/
+backend/venv/
+__pycache__/
+*.pyc
 
 # Editors / OS
 .DS_Store
@@ -31,6 +35,16 @@ Thumbs.db
 .idea/
 .vscode/
 
+
 # Misc
 coverage/
 debug_input.png
+
+# Ignore MNIST model file(s)
+backend/model/mnist_cnn.keras
+backend/model/*.h5
+
+# Ignore local model artifacts
+backend/model/mnist_cnn.keras
+backend/model/*.h5
+backend/model/*.onnx
