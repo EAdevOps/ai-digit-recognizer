@@ -1,54 +1,31 @@
-# app.py
-import os, sys, io, base64, traceback
+# app.py (top section)
+import base64, io, os, sys, traceback
 import numpy as np
 from PIL import Image
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 import tensorflow as tf
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "model/mnist_cnn.keras")
 
-# ---- App & CORS ------------------------------------------------------------
 app = Flask(__name__)
+# Global CORS for simple GETs (/, /health)
+CORS(app, resources={
+    r"/": {"origins": "*"},
+    r"/health": {"origins": "*"},
+})
 
 ALLOWED_ORIGINS = [
-    "https://aidigitrecognizer.netlify.app",  # Netlify site
-    "http://localhost:3000",                  # local dev
+    "https://aidigitrecognizer.netlify.app",
+    "http://localhost:3000",
 ]
 
-# Single CORS setup
-CORS(
-    app,
-    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
-    methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
-)
-
-# Ensure CORS headers are present even on errors
-@app.after_request
-def add_cors_headers(resp):
-    origin = request.headers.get("Origin")
-    if origin in ALLOWED_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
-    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return resp
-
-# ---- Boot logs & model load -----------------------------------------------
 print(f"[BOOT] Python: {sys.version}", flush=True)
 print(f"[BOOT] CWD: {os.getcwd()}", flush=True)
 print(f"[BOOT] Looking for model at: {MODEL_PATH}", flush=True)
 
-model = None
-try:
-    model = tf.keras.models.load_model(MODEL_PATH)
-    print("[BOOT] Model loaded ✅", flush=True)
-except Exception:
-    print("[BOOT] Model load FAILED ❌", flush=True)
-    traceback.print_exc()
-    raise
-
+model = tf.keras.models.load_model(MODEL_PATH)
+print("[BOOT] Model loaded ✅", flush=True)
 # ---- Preprocessing ---------------------------------------------------------
 def preprocess_from_base64(b64_png: str) -> np.ndarray:
     # Strip data URL prefix if present
@@ -151,40 +128,29 @@ def root():
 def health():
     return {"status": "ok"}
 
-@app.route("/predict", methods=["POST", "OPTIONS"])
+@app.post("/predict")
+@cross_origin(origins=ALLOWED_ORIGINS, methods=["POST"], allow_headers=["Content-Type"])
 def predict():
-    if request.method == "OPTIONS":
-        return ("", 204)
-
     if model is None:
         return jsonify({"error": "Model not loaded on server"}), 503
 
-    try:
-        # Case 1: multipart/form-data (preferred from frontend)
-        if "file" in request.files:
-            f = request.files["file"]
-            img = Image.open(f.stream)
-            x = preprocess_from_image(img)
+    # ---- accept either form-data (file) OR JSON { image: "dataURL" }
+    if "file" in request.files:
+        f = request.files["file"]
+        img = Image.open(f.stream).convert("L")
+        # ... (keep your same preprocessing steps)
+        # build x = (1,28,28,1) np.float32
+    else:
+        data = request.get_json(silent=True) or {}
+        data_url = data.get("image", "")
+        if not data_url:
+            return jsonify({"error": "Provide form-data file or JSON { image }"}), 400
+        x = preprocess_from_base64(data_url)
 
-        # Case 2: JSON { image: "data:image/png;base64,..." }
-        elif request.is_json:
-            data = request.get_json(silent=True) or {}
-            data_url = data.get("image", "")
-            if not data_url:
-                return jsonify({"error": "Provide JSON { image: <dataURL> }"}), 400
-            x = preprocess_from_base64(data_url)
-
-        else:
-            return jsonify({"error": "Provide form-data file or JSON {image}"}), 400
-
-        # Predict
-        probs = model.predict(x, verbose=0)[0].tolist()
-        pred = int(np.argmax(probs))
-        conf = float(max(probs))
-        return jsonify({"prediction": pred, "confidence": conf, "probs": probs})
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    probs = model.predict(x, verbose=0)[0]
+    pred = int(np.argmax(probs))
+    conf = float(np.max(probs))
+    return jsonify({"prediction": pred, "confidence": conf, "probs": probs.tolist()})
 
 # ---- Entrypoint ------------------------------------------------------------
 if __name__ == "__main__":
