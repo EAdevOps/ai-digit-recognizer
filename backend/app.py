@@ -1,69 +1,93 @@
-# app.py (top section)
+# app.py
 import base64, io, os, sys, traceback
+from flask import Flask, request, jsonify, current_app, make_response
+from flask_cors import CORS
 import numpy as np
-
-from flask import Flask, request, jsonify
-from flask_cors import CORS, cross_origin
-import tensorflow as tf
 from PIL import Image
-try:
-    RESAMPLE = Image.Resampling.LANCZOS  # Pillow ≥10/11
-except AttributeError:
-    RESAMPLE = getattr(Image, "LANCZOS", Image.BICUBIC)  # fallback for older Pillow
-app = Flask(__name__)
-# Basic CORS for simple GETs
-CORS(app, resources={
-    r"/": {"origins": "*"},
-    r"/health": {"origins": "*"},
-})
+import tensorflow as tf
 
-ALLOWED_ORIGINS = [
+# ---------- Pillow resample constant (Pillow 11+ compatibility) ----------
+try:
+    RESAMPLE = Image.Resampling.LANCZOS  # Pillow ≥10
+except AttributeError:
+    RESAMPLE = getattr(Image, "LANCZOS", Image.BICUBIC)  # fallback
+
+MODEL_PATH = os.environ.get("MODEL_PATH", "model/mnist_cnn.keras")
+
+app = Flask(__name__)
+
+# Allow your Netlify site + localhost (dev)
+ALLOWED_ORIGINS = {
     "https://aidigitrecognizer.netlify.app",
     "http://localhost:3000",
-]
+}
 
-# Add CORS headers to EVERY response (even if an error bubbles up)
+# Flask-CORS for normal happy path
+CORS(
+    app,
+    resources={r"/*": {"origins": list(ALLOWED_ORIGINS)}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
+# Also force CORS headers on EVERY response, including errors
 @app.after_request
 def add_cors_headers(resp):
-    origin = request.headers.get("Origin", "")
+    origin = request.headers.get("Origin")
     if origin in ALLOWED_ORIGINS:
         resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
-# ---- Preprocessing ---------------------------------------------------------
+
+# ---- Model load with clear logs ----
+print(f"[BOOT] Python: {sys.version}", flush=True)
+print(f"[BOOT] CWD: {os.getcwd()}", flush=True)
+print(f"[BOOT] Looking for model at: {MODEL_PATH}", flush=True)
+
+try:
+    mdl = tf.keras.models.load_model(MODEL_PATH)
+    app.config["MODEL"] = mdl
+    print("[BOOT] Model loaded ✅", flush=True)
+except Exception:
+    print("[BOOT] Model load FAILED ❌", flush=True)
+    traceback.print_exc()
+    # don't raise — service can still return a clear 503 on /predict
+    app.config["MODEL"] = None
+
+def get_model():
+    return current_app.config.get("MODEL")
+
 def preprocess_from_base64(b64_png: str) -> np.ndarray:
-    # Strip data URL prefix if present
     if b64_png.startswith("data:image"):
         b64_png = b64_png.split(",", 1)[1]
-
     img_bytes = base64.b64decode(b64_png)
     img = Image.open(io.BytesIO(img_bytes)).convert("L")  # grayscale
 
-    # Resize large first for stable steps
+    # Resize to stabilize, normalize 0..1
     img = img.resize((280, 280), RESAMPLE)
     arr = np.array(img, dtype=np.float32) / 255.0
 
-    # Auto-invert if background is bright
+    # Auto-invert if background is white
     if arr.mean() > 0.5:
         arr = 1.0 - arr
 
-    # Light threshold to boost contrast
+    # Light thresholding
     arr_bin = (arr > 0.2).astype(np.float32)
 
-    # If nothing drawn, return zeros (1,28,28,1)
+    # Empty drawing → zeros
     if arr_bin.sum() == 0:
         arr28 = np.zeros((28, 28), dtype=np.float32)
         return arr28[None, ..., None]
 
-    # Crop to bounding box
+    # Crop to digit bbox
     ys, xs = np.where(arr_bin > 0)
     y0, y1 = ys.min(), ys.max() + 1
     x0, x1 = xs.min(), xs.max() + 1
     crop = arr[y0:y1, x0:x1]
 
-    # Pad to square, resize to 20x20
+    # Pad to square, resize to 20x20, center into 28x28
     h, w = crop.shape
     m = max(h, w)
     sq = np.zeros((m, m), dtype=np.float32)
@@ -74,11 +98,10 @@ def preprocess_from_base64(b64_png: str) -> np.ndarray:
     pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), RESAMPLE)
     d20 = np.array(pil20, dtype=np.float32) / 255.0
 
-    # Center 20x20 into 28x28 (MNIST style)
     arr28 = np.zeros((28, 28), dtype=np.float32)
     arr28[4:24, 4:24] = d20
 
-    # Recenter via integer CoM shift
+    # Rough center-of-mass recentering
     ys2, xs2 = np.nonzero(arr28 > 0.01)
     if len(ys2) > 0:
         weights = arr28[ys2, xs2]
@@ -91,41 +114,6 @@ def preprocess_from_base64(b64_png: str) -> np.ndarray:
 
     return arr28[None, ..., None]
 
-def preprocess_from_image(img: Image.Image) -> np.ndarray:
-    """Same pipeline as base64, starting from a PIL Image (grayscale)."""
-    img = img.convert("L").resize((280, 280), RESAMPLE)
-    arr = np.array(img, dtype=np.float32) / 255.0
-    if arr.mean() > 0.5:
-        arr = 1.0 - arr
-    arr_bin = (arr > 0.2).astype(np.float32)
-    if arr_bin.sum() == 0:
-        return np.zeros((1, 28, 28, 1), dtype=np.float32)
-    ys, xs = np.where(arr_bin > 0)
-    y0, y1 = ys.min(), ys.max() + 1
-    x0, x1 = xs.min(), xs.max() + 1
-    crop = arr[y0:y1, x0:x1]
-    h, w = crop.shape
-    m = max(h, w)
-    sq = np.zeros((m, m), dtype=np.float32)
-    y_start = (m - h) // 2
-    x_start = (m - w) // 2
-    sq[y_start:y_start + h, x_start:x_start + w] = crop
-    pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), RESAMPLE)
-    d20 = np.array(pil20, dtype=np.float32) / 255.0
-    arr28 = np.zeros((28, 28), dtype=np.float32)
-    arr28[4:24, 4:24] = d20
-    ys2, xs2 = np.nonzero(arr28 > 0.01)
-    if len(ys2) > 0:
-        weights = arr28[ys2, xs2]
-        cy = int(round(np.average(ys2, weights=weights)))
-        cx = int(round(np.average(xs2, weights=weights)))
-        dy = 14 - cy
-        dx = 14 - cx
-        arr28 = np.roll(arr28, shift=dy, axis=0)
-        arr28 = np.roll(arr28, shift=dx, axis=1)
-    return arr28[None, ..., None].astype(np.float32)
-
-# ---- Routes ----------------------------------------------------------------
 @app.get("/")
 def root():
     return {"ok": True, "health": "/health", "predict": "/predict"}
@@ -134,31 +122,73 @@ def root():
 def health():
     return {"status": "ok"}
 
-@app.post("/predict")
-@cross_origin(origins=ALLOWED_ORIGINS, methods=["POST"], allow_headers=["Content-Type"])
+@app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
+    # Handle preflight quickly
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    model = get_model()
     if model is None:
         return jsonify({"error": "Model not loaded on server"}), 503
 
-    # ---- accept either form-data (file) OR JSON { image: "dataURL" }
-    if "file" in request.files:
-        f = request.files["file"]
-        img = Image.open(f.stream).convert("L")
-        # ... (keep your same preprocessing steps)
-        # build x = (1,28,28,1) np.float32
-    else:
-        data = request.get_json(silent=True) or {}
-        data_url = data.get("image", "")
-        if not data_url:
-            return jsonify({"error": "Provide form-data file or JSON { image }"}), 400
-        x = preprocess_from_base64(data_url)
+    try:
+        # Case 1: multipart/form-data
+        if "file" in request.files:
+            f = request.files["file"]
+            img = Image.open(f.stream).convert("L")
+            img = img.resize((280, 280), RESAMPLE)
+            arr = np.array(img, dtype=np.float32) / 255.0
+            if arr.mean() > 0.5:
+                arr = 1.0 - arr
+            arr_bin = (arr > 0.2).astype(np.float32)
+            if arr_bin.sum() == 0:
+                x = np.zeros((1, 28, 28, 1), dtype=np.float32)
+            else:
+                ys, xs = np.where(arr_bin > 0)
+                y0, y1 = ys.min(), ys.max() + 1
+                x0, x1 = xs.min(), xs.max() + 1
+                crop = arr[y0:y1, x0:x1]
+                h, w = crop.shape
+                m = max(h, w)
+                sq = np.zeros((m, m), dtype=np.float32)
+                y_start = (m - h) // 2
+                x_start = (m - w) // 2
+                sq[y_start:y_start+h, x_start:x_start+w] = crop
+                pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), RESAMPLE)
+                d20 = np.array(pil20, dtype=np.float32) / 255.0
+                arr28 = np.zeros((28, 28), dtype=np.float32)
+                arr28[4:24, 4:24] = d20
+                ys2, xs2 = np.nonzero(arr28 > 0.01)
+                if len(ys2) > 0:
+                    weights = arr28[ys2, xs2]
+                    cy = int(round(np.average(ys2, weights=weights)))
+                    cx = int(round(np.average(xs2, weights=weights)))
+                    dy = 14 - cy
+                    dx = 14 - cx
+                    arr28 = np.roll(arr28, shift=dy, axis=0)
+                    arr28 = np.roll(arr28, shift=dx, axis=1)
+                x = arr28[None, ..., None].astype(np.float32)
 
-    probs = model.predict(x, verbose=0)[0]
-    pred = int(np.argmax(probs))
-    conf = float(np.max(probs))
-    return jsonify({"prediction": pred, "confidence": conf, "probs": probs.tolist()})
+        # Case 2: JSON { image: "data:image/png;base64,..." }
+        elif request.is_json:
+            data = request.get_json(silent=True) or {}
+            data_url = data.get("image", "")
+            if not data_url:
+                return jsonify({"error": "Provide JSON { image: <dataURL> }"}), 400
+            x = preprocess_from_base64(data_url)
 
-# ---- Entrypoint ------------------------------------------------------------
+        else:
+            return jsonify({"error": "Provide form-data file or JSON {image}"}), 400
+
+        probs = model.predict(x, verbose=0)[0]
+        pred = int(np.argmax(probs))
+        conf = float(np.max(probs))
+        return jsonify({"prediction": pred, "confidence": conf, "probs": probs.tolist()})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
