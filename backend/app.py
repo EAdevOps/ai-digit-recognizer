@@ -6,10 +6,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS, cross_origin
 import tensorflow as tf
 
-MODEL_PATH = os.environ.get("MODEL_PATH", "model/mnist_cnn.keras")
-
 app = Flask(__name__)
-# Global CORS for simple GETs (/, /health)
+# Basic CORS for simple GETs
 CORS(app, resources={
     r"/": {"origins": "*"},
     r"/health": {"origins": "*"},
@@ -20,12 +18,16 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
 ]
 
-print(f"[BOOT] Python: {sys.version}", flush=True)
-print(f"[BOOT] CWD: {os.getcwd()}", flush=True)
-print(f"[BOOT] Looking for model at: {MODEL_PATH}", flush=True)
-
-model = tf.keras.models.load_model(MODEL_PATH)
-print("[BOOT] Model loaded ✅", flush=True)
+# Add CORS headers to EVERY response (even if an error bubbles up)
+@app.after_request
+def add_cors_headers(resp):
+    origin = request.headers.get("Origin", "")
+    if origin in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    return resp
 # ---- Preprocessing ---------------------------------------------------------
 def preprocess_from_base64(b64_png: str) -> np.ndarray:
     # Strip data URL prefix if present
