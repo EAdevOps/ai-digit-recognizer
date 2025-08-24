@@ -1,31 +1,32 @@
 # app.py
 import os, io, sys, base64, traceback
 import numpy as np
-from PIL import Image, ImageFile
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from PIL import Image, ImageFile
 import tensorflow as tf
 
-# Be tolerant of short/odd PNG streams
+# Tolerate short/odd PNG streams
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "model/mnist_cnn.keras")
 
 app = Flask(__name__)
 
-# Simple, global CORS. (Open during debug; tighten later if you want)
+# Simple global CORS (open during debug; tighten later by listing your Netlify origin)
 CORS(
     app,
     resources={r"/*": {"origins": "*"}},
-    supports_credentials=False
+    supports_credentials=False,
 )
 
-# 🔒 Force CORS headers on EVERY response, including 4xx/5xx
+# Force CORS headers on EVERY response, including errors
 @app.after_request
 def add_cors_headers(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"  # or your Netlify URL
+    resp.headers["Access-Control-Allow-Origin"] = "*"  # or "https://aidigitrecognizer.netlify.app"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Max-Age"] = "600"
     resp.headers["Vary"] = "Origin"
     return resp
 
@@ -33,9 +34,16 @@ print(f"[BOOT] Python: {sys.version}", flush=True)
 print(f"[BOOT] CWD: {os.getcwd()}", flush=True)
 print(f"[BOOT] Looking for model at: {MODEL_PATH}", flush=True)
 
-# Load the model once at boot
+# Load model once at boot
 model = tf.keras.models.load_model(MODEL_PATH)
 print("[BOOT] Model loaded ✅", flush=True)
+
+# Pick a safe resample constant across Pillow versions
+try:
+    from PIL import Image as _PILImage
+    RESAMPLE = _PILImage.Resampling.LANCZOS  # Pillow ≥ 10
+except Exception:
+    RESAMPLE = Image.LANCZOS  # older Pillow fallback
 
 def robust_png_to_gray(png_bytes: bytes) -> Image.Image:
     """Load PNG -> grayscale, tolerating truncated streams."""
@@ -48,7 +56,7 @@ def robust_png_to_gray(png_bytes: bytes) -> Image.Image:
         return img.convert("L")
 
 def preprocess_from_base64(data_url: str) -> np.ndarray:
-    # strip "data:image/png;base64," if present
+    # Strip data URL prefix if present
     if data_url.startswith("data:image"):
         data_url = data_url.split(",", 1)[1]
     data_url = data_url.strip()
@@ -56,15 +64,15 @@ def preprocess_from_base64(data_url: str) -> np.ndarray:
     img_bytes = base64.b64decode(data_url)
     img = robust_png_to_gray(img_bytes)
 
-    # === your pipeline, unchanged in spirit ===
-    img = img.resize((280, 280), Image.LANCZOS)
+    # === Preprocess to MNIST format ===
+    img = img.resize((280, 280), RESAMPLE)
     arr = np.array(img, dtype=np.float32) / 255.0
 
-    # invert if white background
+    # Auto-invert if background is white
     if arr.mean() > 0.5:
         arr = 1.0 - arr
 
-    # threshold for bbox
+    # Light threshold → bounding box
     arr_bin = (arr > 0.2).astype(np.float32)
     if arr_bin.sum() == 0:
         return np.zeros((1, 28, 28, 1), dtype=np.float32)
@@ -74,20 +82,22 @@ def preprocess_from_base64(data_url: str) -> np.ndarray:
     x0, x1 = xs.min(), xs.max() + 1
     crop = arr[y0:y1, x0:x1]
 
+    # Pad to square, then resize to 20x20
     h, w = crop.shape
     m = max(h, w)
     sq = np.zeros((m, m), dtype=np.float32)
-    ys = (m - h) // 2
-    xs = (m - w) // 2
-    sq[ys:ys + h, xs:xs + w] = crop
+    y_start = (m - h) // 2
+    x_start = (m - w) // 2
+    sq[y_start:y_start + h, x_start:x_start + w] = crop
 
-    pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), Image.LANCZOS)
+    pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), RESAMPLE)
     d20 = np.array(pil20, dtype=np.float32) / 255.0
 
+    # Place 20x20 into center of 28x28
     arr28 = np.zeros((28, 28), dtype=np.float32)
     arr28[4:24, 4:24] = d20
 
-    # center-of-mass recenter
+    # Center-of-mass recenter (integer shift)
     yy, xx = np.nonzero(arr28 > 0.01)
     if len(yy) > 0:
         weights = arr28[yy, xx]
@@ -98,6 +108,7 @@ def preprocess_from_base64(data_url: str) -> np.ndarray:
         arr28 = np.roll(arr28, dy, axis=0)
         arr28 = np.roll(arr28, dx, axis=1)
 
+    # Final model shape: (1, 28, 28, 1)
     return arr28[None, ..., None]
 
 @app.get("/")
@@ -108,11 +119,15 @@ def root():
 def health():
     return {"status": "ok"}
 
-# Let Flask handle preflight automatically; we still accept OPTIONS via CORS
-@app.post("/predict")
+# Explicitly handle preflight quickly
+@app.route("/predict", methods=["OPTIONS"])
+def predict_options():
+    return ("", 204)
+
+@app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Prefer JSON: { image: "data:image/png;base64,..." }
+        # Case 1: JSON { image: "data:image/png;base64,..." }
         if request.is_json:
             data = request.get_json(silent=True) or {}
             img_data = data.get("image")
@@ -120,10 +135,11 @@ def predict():
                 return jsonify({"error": "Provide JSON { image: <dataURL> }"}), 400
             x = preprocess_from_base64(img_data)
 
-        # Also accept form-data "file"
+        # Case 2: multipart/form-data with "file"
         elif "file" in request.files:
-            f = request.files["file"].read()
-            gray = robust_png_to_gray(f)
+            fbytes = request.files["file"].read()
+            gray = robust_png_to_gray(fbytes)
+            # Reuse the same pipeline by re-encoding to base64 PNG once
             buf = io.BytesIO()
             gray.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode("ascii")
