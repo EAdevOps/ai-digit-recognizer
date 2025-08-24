@@ -121,9 +121,10 @@ export default function DigitCanvas() {
         if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
         const json = JSON.parse(text);
         setResult(json);
-      } catch (e: any) {
-        console.error("Predict failed:", e);
-        alert(`Predict failed: ${e.message || e}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("Predict failed:", err);
+        alert(`Predict failed: ${msg}`);
       }
     }, "image/png");
   };
