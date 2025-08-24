@@ -95,28 +95,33 @@ export default function DigitCanvas() {
   const predict = async () => {
     setResult(null);
 
-    // downscale canvas to 28×28
     const big = canvasRef.current!;
     const tmp = document.createElement("canvas");
     tmp.width = 28;
     tmp.height = 28;
-    tmp.getContext("2d")!.drawImage(big, 0, 0, 28, 28);
+    const tctx = tmp.getContext("2d")!;
+    tctx.drawImage(big, 0, 0, 28, 28);
 
-    // canvas → PNG blob → FormData
+    // turn the tiny canvas into a Blob and send as file (form-data)
     const blob: Blob = await new Promise((resolve) =>
       tmp.toBlob((b) => resolve(b as Blob), "image/png")
     );
-    const fd = new FormData();
-    fd.append("file", blob, "digit.png");
 
-    const API_URL =
-      process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE || "";
-    if (!API_URL) throw new Error("API URL env var missing");
+    const form = new FormData();
+    form.append("file", blob, "digit.png");
 
-    const res = await fetch(`${API_URL}/predict`, { method: "POST", body: fd });
-    if (!res.ok) throw new Error(await res.text());
-    const json = (await res.json()) as PredictResponse;
-    setResult(json);
+    try {
+      const res = await fetch(`${API_URL}/predict`, {
+        method: "POST",
+        body: form, // IMPORTANT: no manual Content-Type header
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const json = (await res.json()) as PredictResponse;
+      setResult(json);
+    } catch (e: unknown) {
+      console.error("Predict failed:", e);
+      alert(`Predict failed: ${(e as Error).message}`);
+    }
   };
 
   return (
