@@ -19,13 +19,15 @@ fi
 # Optional: verify checksum if you set one
 if [ -n "${MODEL_SHA256:-}" ]; then
   echo "Verifying checksum..."
-  ACTUAL=$(sha256sum model/mnist_cnn.keras | awk '{print $1}')
-  if [ "$ACTUAL" != "$MODEL_SHA256" ]; then
+  EXPECTED="$(echo "$MODEL_SHA256" | tr '[:upper:]' '[:lower:]')"
+  ACTUAL="$(sha256sum model/mnist_cnn.keras | awk '{print tolower($1)}')"
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
     echo "Checksum mismatch!"
-    echo "Expected: $MODEL_SHA256"
+    echo "Expected: $EXPECTED"
     echo "Actual:   $ACTUAL"
     exit 1
   fi
 fi
+
 
 echo "Build step complete."
