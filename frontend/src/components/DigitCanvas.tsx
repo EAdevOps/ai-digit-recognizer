@@ -95,6 +95,7 @@ export default function DigitCanvas() {
   const predict = async () => {
     setResult(null);
 
+    // downscale to 28x28
     const big = canvasRef.current!;
     const tmp = document.createElement("canvas");
     tmp.width = 28;
@@ -102,26 +103,29 @@ export default function DigitCanvas() {
     const tctx = tmp.getContext("2d")!;
     tctx.drawImage(big, 0, 0, 28, 28);
 
-    // turn the tiny canvas into a Blob and send as file (form-data)
-    const blob: Blob = await new Promise((resolve) =>
-      tmp.toBlob((b) => resolve(b as Blob), "image/png")
-    );
+    // send as file (no headers)
+    tmp.toBlob(async (blob) => {
+      if (!blob) {
+        alert("Could not read canvas");
+        return;
+      }
+      const form = new FormData();
+      form.append("file", blob, "digit.png");
 
-    const form = new FormData();
-    form.append("file", blob, "digit.png");
-
-    try {
-      const res = await fetch(`${API_URL}/predict`, {
-        method: "POST",
-        body: form, // IMPORTANT: no manual Content-Type header
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const json = (await res.json()) as PredictResponse;
-      setResult(json);
-    } catch (e: unknown) {
-      console.error("Predict failed:", e);
-      alert(`Predict failed: ${(e as Error).message}`);
-    }
+      try {
+        const res = await fetch(`${API_URL}/predict`, {
+          method: "POST",
+          body: form, // ← no Content-Type header
+        });
+        const text = await res.text(); // handy for debugging
+        if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+        const json = JSON.parse(text);
+        setResult(json);
+      } catch (e: any) {
+        console.error("Predict failed:", e);
+        alert(`Predict failed: ${e.message || e}`);
+      }
+    }, "image/png");
   };
 
   return (
