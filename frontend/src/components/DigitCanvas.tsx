@@ -12,8 +12,8 @@ export default function DigitCanvas() {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [result, setResult] = useState<PredictResponse | null>(null);
-  const API_URL =
-    process.env.NEXT_PUBLIC_API_BASE || process.env.NEXT_PUBLIC_API_URL || "";
+  const API_URL = "https://ai-digit-recognizer.onrender.com"; // TEMP for testing
+
   if (!API_URL) {
     console.warn("NEXT_PUBLIC_API_URL (or _API_BASE) is missing!");
   } else {
@@ -95,29 +95,28 @@ export default function DigitCanvas() {
   const predict = async () => {
     setResult(null);
 
-    // make a tiny 28x28 version to send
+    // downscale canvas to 28×28
     const big = canvasRef.current!;
     const tmp = document.createElement("canvas");
     tmp.width = 28;
     tmp.height = 28;
-    const tctx = tmp.getContext("2d")!;
-    tctx.drawImage(big, 0, 0, 28, 28);
-    const dataUrl = tmp.toDataURL("image/png");
+    tmp.getContext("2d")!.drawImage(big, 0, 0, 28, 28);
 
-    try {
-      const res = await fetch(`${API_URL}/predict`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: dataUrl }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const json = (await res.json()) as PredictResponse;
-      setResult(json);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error("Predict failed:", msg);
-      alert(`Predict failed: ${msg}`);
-    }
+    // canvas → PNG blob → FormData
+    const blob: Blob = await new Promise((resolve) =>
+      tmp.toBlob((b) => resolve(b as Blob), "image/png")
+    );
+    const fd = new FormData();
+    fd.append("file", blob, "digit.png");
+
+    const API_URL =
+      process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE || "";
+    if (!API_URL) throw new Error("API URL env var missing");
+
+    const res = await fetch(`${API_URL}/predict`, { method: "POST", body: fd });
+    if (!res.ok) throw new Error(await res.text());
+    const json = (await res.json()) as PredictResponse;
+    setResult(json);
   };
 
   return (

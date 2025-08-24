@@ -108,31 +108,23 @@ def root():
 def health():
     return {"status": "ok"}
 
-@app.post("/predict")
+@app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
     if model is None:
         return jsonify({"error": "Model not loaded on server"}), 503
+
     try:
-        img = None
-
-        # Case 1: JSON { image: "data:image/png;base64,..." }
-        if request.is_json:
-            data = request.get_json(silent=True) or {}
-            data_url = data.get("image", "")
-            if not data_url:
-                return jsonify({"error": "Provide JSON { image: <dataURL> }"}), 400
-            x = preprocess_from_base64(data_url)
-
-        # Case 2: multipart/form-data with a file field
-        elif "file" in request.files:
+        # --- Case 1: multipart/form-data (file upload) ---
+        if "file" in request.files:
             f = request.files["file"]
             img = Image.open(f.stream).convert("L")
-            # Reuse your pipeline minus the base64 decode:
-            # (wrap into a helper if you want—inline is fine for now)
-            # Resize, invert if needed, crop, pad to 28x28 just like your function:
+            # reuse your exact preprocessing steps (no base64 needed):
             img = img.resize((280, 280), Image.LANCZOS)
             arr = np.array(img, dtype=np.float32) / 255.0
-            if arr.mean() > 0.5:  # auto invert like your base64 path
+            if arr.mean() > 0.5:
                 arr = 1.0 - arr
             arr_bin = (arr > 0.2).astype(np.float32)
             if arr_bin.sum() == 0:
@@ -147,7 +139,7 @@ def predict():
                 sq = np.zeros((m, m), dtype=np.float32)
                 y_start = (m - h) // 2
                 x_start = (m - w) // 2
-                sq[y_start:y_start + h, x_start:x_start + w] = crop
+                sq[y_start:y_start+h, x_start:x_start+w] = crop
                 pil20 = Image.fromarray((sq * 255).astype(np.uint8)).resize((20, 20), Image.LANCZOS)
                 d20 = np.array(pil20, dtype=np.float32) / 255.0
                 arr28 = np.zeros((28, 28), dtype=np.float32)
@@ -163,11 +155,17 @@ def predict():
                     arr28 = np.roll(arr28, shift=dx, axis=1)
                 x = arr28[None, ..., None].astype(np.float32)
 
-        else:
-            return jsonify({"error": "Provide JSON {image} or form-data file"}), 400
+        # --- Case 2: JSON { image: "data:image/png;base64,..." } ---
+        elif request.is_json:
+            data = request.get_json(silent=True) or {}
+            data_url = data.get("image", "")
+            if not data_url:
+                return jsonify({"error": "Provide JSON { image: <dataURL> }"}), 400
+            x = preprocess_from_base64(data_url)
 
-        # Predict
-        print("DEBUG x.shape:", x.shape, "x.dtype:", x.dtype, flush=True)
+        else:
+            return jsonify({"error": "Provide form-data file or JSON {image}"}), 400
+
         probs = model.predict(x, verbose=0)[0]
         pred = int(np.argmax(probs))
         conf = float(np.max(probs))
