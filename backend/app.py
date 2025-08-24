@@ -1,5 +1,6 @@
 # app.py
 import base64, io, os, sys, traceback
+from flask_cors import CORS
 import numpy as np
 from PIL import Image, ImageOps
 from flask import Flask, request, jsonify
@@ -15,7 +16,9 @@ CORS(
     methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
-
+CORS(app, resources={r"/*": {
+  "origins": ["https://aidigitrecognizer.netlify.app"] 
+}})
 # ---- Model load with clear logs ----
 print(f"[BOOT] Python: {sys.version}", flush=True)
 print(f"[BOOT] CWD: {os.getcwd()}", flush=True)
