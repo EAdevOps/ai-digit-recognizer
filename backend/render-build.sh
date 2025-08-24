@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+echo ">>> Python version:"
+python --version
+which python
+echo ">>> Pip version:"
+pip --version
 # 1) Install Python deps
 python -m pip install --upgrade pip
 pip install -r requirements.txt
