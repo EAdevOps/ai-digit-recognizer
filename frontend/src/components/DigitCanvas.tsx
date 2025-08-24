@@ -12,7 +12,8 @@ export default function DigitCanvas() {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [result, setResult] = useState<PredictResponse | null>(null);
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+  const API_URL =
+    process.env.NEXT_PUBLIC_API_BASE || process.env.NEXT_PUBLIC_API_URL || "";
 
   // ----- setup the canvas once
   useEffect(() => {
@@ -107,9 +108,10 @@ export default function DigitCanvas() {
       if (!res.ok) throw new Error(await res.text());
       const json = (await res.json()) as PredictResponse;
       setResult(json);
-    } catch (e: any) {
-      console.error("Predict failed:", e);
-      alert(`Predict failed: ${e.message || e}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Predict failed:", msg);
+      alert(`Predict failed: ${msg}`);
     }
   };
 
